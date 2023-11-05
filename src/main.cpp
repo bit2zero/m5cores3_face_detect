@@ -6,6 +6,9 @@
 #include <human_face_detect_mnp01.hpp>
 
 #include <SD.h>
+#include <WiFi.h>
+#include <time.h>
+#include <ArduinoJson.h>
 
 #define TWO_STAGE 1 /*<! 1: detect by two-stage which is more accurate but slower(with keypoints). */
                     /*<! 0: detect by one-stage which is less accurate but faster(without keypoints). */
@@ -38,6 +41,101 @@
 #define PATHNAME_SIZE 255
 char pathname[PATHNAME_SIZE];
 
+String JsonData; // JSON形式データのバッファ
+int sdstat = 0;  // microSDカードからのデータ読み出し状況（False:0,True:1）
+char buf[60];
+StaticJsonDocument<192> n_jsondata; // JSON形式データ格納用メモリの確保
+String wifi_fname = "/wifi.json";
+String i_ssid, i_pass;
+
+const char *NTPSRV = "ntp.jst.mfeed.ad.jp";
+const long GMT_OFFSET = 9 * 3600; // JST(GMT+9)
+const int DAYLIGHT_OFFSET = 0;    // サマータイム設定
+struct tm timeInfo;               // tmオブジェクトをtimeinfoとして生成
+
+void time_sync(const char *ntpsrv, long gmt_offset, int daylight_offset)
+{
+
+  configTime(gmt_offset, daylight_offset, ntpsrv);
+  delay(100);
+
+  if (getLocalTime(&timeInfo))
+  {
+    Serial.printf("NTP : %s -> ", ntpsrv);
+    sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d",
+            timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday,
+            timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
+    Serial.println(buf);
+  }
+  else
+  {
+    M5_LOGE("NTP Sync Error");
+  }
+}
+
+void get_wifi_info()
+{
+  if (SD.exists(wifi_fname))
+  {
+    File myFile = SD.open(wifi_fname, FILE_READ);
+    if (myFile)
+    {
+      while (myFile.available())
+      {
+        JsonData.concat(myFile.readString());
+      }
+      myFile.close();
+      sdstat = 1;
+    }
+    else
+    {
+      Serial.printf("%s can't read.", wifi_fname);
+      sdstat = 0;
+    }
+  }
+  else
+  {
+    Serial.printf("%s not found.", wifi_fname);
+    sdstat = 0;
+  }
+}
+
+void read_json_wifi_info()
+{
+  DeserializationError error = deserializeJson(n_jsondata, JsonData);
+  if (error)
+  {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+  }
+  else
+  {
+    i_ssid = n_jsondata["ssid"].as<String>();
+    i_pass = n_jsondata["pass"].as<String>();
+
+    Serial.printf("ID: %s\n", i_ssid);
+  }
+}
+
+void connect_wifi()
+{
+  Serial.print("Conecting Wi-Fi ");
+
+  char buf_ssid[33], buf_pass[65];
+  i_ssid.toCharArray(buf_ssid, 33);
+  i_pass.toCharArray(buf_pass, 65);
+
+  WiFi.begin(buf_ssid, buf_pass);
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.print("WiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
+}
+
 static camera_config_t camera_config = {
     .pin_pwdn = PWDN_GPIO_NUM,
     .pin_reset = RESET_GPIO_NUM,
@@ -55,13 +153,13 @@ static camera_config_t camera_config = {
     .pin_vsync = VSYNC_GPIO_NUM,
     .pin_href = HREF_GPIO_NUM,
     .pin_pclk = PCLK_GPIO_NUM,
-    .xclk_freq_hz = 20000000,
+    .xclk_freq_hz = 2000000,
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
     .pixel_format = PIXFORMAT_RGB565, // PIXFORMAT_RGB565 for face detection/recognition, PIXFORMAT_JPEG for streaming
     .frame_size = FRAMESIZE_QVGA,     // QVGA(320x240), FRAMESIZE_UXGA
     .jpeg_quality = 0,                // 12
-    .fb_count = 2,                    // 1
+    .fb_count = 2,                    // double buffer
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
 };
@@ -70,6 +168,7 @@ esp_err_t camera_init()
 {
   // initialize the camera
   M5.In_I2C.release();
+  delay(100);
   esp_err_t err = esp_camera_init(&camera_config);
   if (err != ESP_OK)
   {
@@ -225,6 +324,7 @@ static std::list<dl::detect::result_t> face_detect(camera_fb_t *fb)
   return results;
 }
 
+uint32_t bright_time;
 void setup()
 {
   M5.begin();
@@ -235,7 +335,22 @@ void setup()
     delay(100);
   }
 
+  get_wifi_info();
+  if (sdstat == 1)
+  {
+    read_json_wifi_info();
+    connect_wifi();
+  }
+
+  time_sync(NTPSRV, GMT_OFFSET, DAYLIGHT_OFFSET);
+
+  WiFi.disconnect(true); // カメラとの同時使用禁止
+  WiFi.mode(WIFI_OFF);
+
   camera_init();
+
+  // M5.Display.setFont(&fonts::efontJA_24);
+  bright_time = millis();
 
   auto spk_cfg = M5.Speaker.config();
   M5.Speaker.config(spk_cfg);
@@ -244,9 +359,8 @@ void setup()
   {
     M5_LOGE("Speaker not found...");
   }
-  M5.Speaker.tone(2000, 100);
 
-  // M5.Display.setFont(&fonts::efontJA_24);
+  M5.Speaker.tone(2000, 100);
 }
 
 void loop()
@@ -254,6 +368,7 @@ void loop()
   M5.update();
 
   M5.In_I2C.release();
+  delay(100);
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb)
   {
@@ -282,10 +397,11 @@ void loop()
         return;
       }
     }
-    auto dt = M5.Rtc.getDateTime();
+
+    getLocalTime(&timeInfo);
     snprintf(pathname, PATHNAME_SIZE, "/IMG_%04d%02d%02d_%02d%02d%02d.JPG",
-             dt.date.year, dt.date.month, dt.date.date,
-             dt.time.hours, dt.time.minutes, dt.time.seconds);
+             timeInfo.tm_year + 1900, timeInfo.tm_mon + 1, timeInfo.tm_mday,
+             timeInfo.tm_hour, timeInfo.tm_min, timeInfo.tm_sec);
     File file = SD.open(pathname, FILE_WRITE);
     file.write(_jpg_buf, _jpg_buf_len);
     file.close();
@@ -304,12 +420,22 @@ void loop()
     rfb.format = FB_RGB565;
     rfb.data = fb->buf;
     draw_face_boxes(&rfb, &results, 0);
+
+    M5.Display.setBrightness(200);
+    bright_time = millis();
   }
 
-  M5.Display.startWrite();
-  M5.Display.setAddrWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
-  M5.Display.writePixels((uint16_t *)fb->buf, int(fb->len / 2));
-  M5.Display.endWrite();
+  if ((millis() - bright_time) > 5000)
+  {
+    M5.Display.setBrightness(0);
+  }
+  else
+  {
+    M5.Display.startWrite();
+    M5.Display.setAddrWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+    M5.Display.writePixels((uint16_t *)fb->buf, int(fb->len / 2));
+    M5.Display.endWrite();
+  }
 
   esp_camera_fb_return(fb);
 
