@@ -237,6 +237,15 @@ void setup()
 
   camera_init();
 
+  auto spk_cfg = M5.Speaker.config();
+  M5.Speaker.config(spk_cfg);
+  M5.Speaker.begin();
+  if (!M5.Speaker.isEnabled())
+  {
+    M5_LOGE("Speaker not found...");
+  }
+  M5.Speaker.tone(2000, 100);
+
   // M5.Display.setFont(&fonts::efontJA_24);
 }
 
@@ -259,6 +268,11 @@ void loop()
     size_t _jpg_buf_len = 0;
     uint8_t *_jpg_buf = NULL;
 
+    for (int i = 0; i < 3; i++)
+    {
+      M5.Speaker.tone(2000, 100);
+      delay(1000);
+    }
     if (fb->format != PIXFORMAT_JPEG)
     {
       bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
