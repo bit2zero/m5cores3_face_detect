@@ -5,6 +5,8 @@
 #include <human_face_detect_msr01.hpp>
 #include <human_face_detect_mnp01.hpp>
 
+#include <SD.h>
+
 #define TWO_STAGE 1 /*<! 1: detect by two-stage which is more accurate but slower(with keypoints). */
                     /*<! 0: detect by one-stage which is less accurate but faster(without keypoints). */
 
@@ -29,6 +31,13 @@
 #define HREF_GPIO_NUM 38
 #define PCLK_GPIO_NUM 45
 
+#define SD_CS 4
+#define SPI_MOSI 37
+#define SPI_MISO 35
+#define SPI_SCK 36
+#define PATHNAME_SIZE 255
+char pathname[PATHNAME_SIZE];
+
 static camera_config_t camera_config = {
     .pin_pwdn = PWDN_GPIO_NUM,
     .pin_reset = RESET_GPIO_NUM,
@@ -49,7 +58,7 @@ static camera_config_t camera_config = {
     .xclk_freq_hz = 20000000,
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
-    .pixel_format = PIXFORMAT_RGB565, // for face detection/recognition, PIXFORMAT_JPEG for streaming
+    .pixel_format = PIXFORMAT_RGB565, // PIXFORMAT_RGB565 for face detection/recognition, PIXFORMAT_JPEG for streaming
     .frame_size = FRAMESIZE_QVGA,     // QVGA(320x240), FRAMESIZE_UXGA
     .jpeg_quality = 0,                // 12
     .fb_count = 2,                    // 1
@@ -59,13 +68,12 @@ static camera_config_t camera_config = {
 
 esp_err_t camera_init()
 {
-
   // initialize the camera
   M5.In_I2C.release();
   esp_err_t err = esp_camera_init(&camera_config);
   if (err != ESP_OK)
   {
-    M5_LOGE("Camera Init Failed");
+    Serial.printf("Camera init failed with error 0x%x", err);
     return err;
   }
 
@@ -220,9 +228,16 @@ static std::list<dl::detect::result_t> face_detect(camera_fb_t *fb)
 void setup()
 {
   M5.begin();
-  // M5.Display.setFont(&fonts::efontJA_24);
+
+  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+  while (false == SD.begin(SD_CS, SPI))
+  {
+    delay(100);
+  }
 
   camera_init();
+
+  // M5.Display.setFont(&fonts::efontJA_24);
 }
 
 void loop()
@@ -237,10 +252,30 @@ void loop()
     return;
   }
 
-  // snap shot
+  // snap shot to sd card
   auto touch_detail = M5.Touch.getDetail();
   if (M5.BtnA.wasPressed() | touch_detail.wasClicked())
   {
+    size_t _jpg_buf_len = 0;
+    uint8_t *_jpg_buf = NULL;
+
+    if (fb->format != PIXFORMAT_JPEG)
+    {
+      bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
+      if (!jpeg_converted)
+      {
+        M5_LOGE("JPEG compression failed");
+        return;
+      }
+    }
+    auto dt = M5.Rtc.getDateTime();
+    snprintf(pathname, PATHNAME_SIZE, "/IMG_%04d%02d%02d_%02d%02d%02d.JPG",
+             dt.date.year, dt.date.month, dt.date.date,
+             dt.time.hours, dt.time.minutes, dt.time.seconds);
+    File file = SD.open(pathname, FILE_WRITE);
+    file.write(_jpg_buf, _jpg_buf_len);
+    file.close();
+    Serial.printf("saved %s\n", pathname);
   }
 
   std::list<dl::detect::result_t> results = face_detect(fb);
@@ -254,7 +289,6 @@ void loop()
     rfb.bytes_per_pixel = 2;
     rfb.format = FB_RGB565;
     rfb.data = fb->buf;
-
     draw_face_boxes(&rfb, &results, 0);
   }
 
